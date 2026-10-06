@@ -1,0 +1,20 @@
+{
+  "name": "Guitar Guard",
+  "short_name": "GuitarGuard",
+  "description": "Practice guitar to unlock screen time",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#14181f",
+  "theme_color": "#14181f",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Parent dashboard", "url": "/parent", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Start practice", "url": "/child", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

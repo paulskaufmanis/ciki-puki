@@ -1,0 +1,21 @@
+{
+  "name": "guitar-guard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "deploy": "npm run build && wrangler deploy",
+    "db:init": "wrangler d1 execute guitar-guard-db --file=./schema.sql",
+    "db:init:local": "wrangler d1 execute guitar-guard-db --local --file=./schema.sql"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.0",
+    "wrangler": "^4.146.0"
+  }
+}
