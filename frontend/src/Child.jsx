@@ -1,150 +1,185 @@
 import React, { useEffect, useRef, useState } from "react";
-import { getConfig, completeTask, uploadRecording } from "./api.js";
-import { detectPitch } from "./pitch.js";
+import { getTasks, checkTask, feedPet, UNTICKED_KEY } from "./api.js";
+import { templateOf } from "./templates/index.js";
+import Pet from "./Pet.jsx";
+import HighFive from "./HighFive.jsx";
+import Confetti from "./Confetti.jsx";
+import FeedBowl, { TREAT_COUNT } from "./FeedBowl.jsx";
+import { CoinFlight } from "./Coins.jsx";
+import { playCrunch, playFanfare } from "./sound.js";
 
-// For test: allow all frequencies
-const MIN_HZ = 100, MAX_HZ = 20000; // guitar fundamentals live well below 1.2 kHz
-// const MIN_HZ = 80, MAX_HZ = 1200; // guitar fundamentals live well below 1.2 kHz
-const MIN_RMS = 0.002; //for test - allow more background noise
+const EAT_MS = 900;
 
-const MIN_CLARITY = 0.9;    // 0-1; only clean, periodic (musical) tones pass
-const HOLD_MS = 1000;        // keep counting through short gaps between notes
+// Tasks the child unticked today: ticking them again skips the high-five (it was probably a mis-tap)
+const readUnticked = (today) => {
+  try {
+    const v = JSON.parse(localStorage.getItem(UNTICKED_KEY));
+    return v?.date === today && Array.isArray(v.ids) ? v.ids : [];
+  } catch { return []; }
+};
+const markUnticked = (today, id) => {
+  try { localStorage.setItem(UNTICKED_KEY, JSON.stringify({ date: today, ids: [...new Set([...readUnticked(today), id])] })); } catch { /* storage unavailable */ }
+};
 
-const fmt = (s) => { const t = Math.ceil(s); return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`; };
-
-export default function Child() {
-  const [cfg, setCfg] = useState(null);
-  const [phase, setPhase] = useState("idle");   // idle | running | done | error
-  const [remaining, setRemaining] = useState(0);
-  const [hz, setHz] = useState(0);
-  const [listening, setListening] = useState(false);
+// Child home screen: today's to-do list, the pet companion and the end-of-day feeding mode
+export default function Child({ onOpen, pet, onPet }) {
+  const [data, setData] = useState(null);
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(null);
+  const [justDone, setJustDone] = useState(null);
+  const [highFive, setHighFive] = useState(null); // task waiting for the child's high-five
+  const [confetti, setConfetti] = useState(0);
+  const [cheering, setCheering] = useState(false);
+  const [treats, setTreats] = useState(TREAT_COUNT);
+  const [feedMood, setFeedMood] = useState("hungry");
+  const [celebrating, setCelebrating] = useState(false); // from the first bite until the coins have landed
+  const [reward, setReward] = useState(null);
+  const [feedError, setFeedError] = useState("");
+  const petRef = useRef(null);
+  const slap = useRef(null);
+  const timers = useRef([]);
 
-  const ctxRef = useRef(null), streamRef = useRef(null), wakeRef = useRef(null);
-  const recorderRef = useRef(null);
-  const state = useRef({ remaining: 0, total: 0, lastActive: 0, streak: 0 });
+  const later = (fn, ms) => { timers.current.push(setTimeout(fn, ms)); };
+  useEffect(() => () => timers.current.forEach(clearTimeout), []);
 
-  useEffect(() => { getConfig().then(setCfg).catch((e) => setError(e.message)); }, []);
-  useEffect(() => () => stop(), []);
+  const load = () => getTasks().then((d) => { setData(d); setError(""); }).catch((e) => setError(e.message));
 
-  const stop = () => {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    ctxRef.current?.close().catch(() => { });
-    wakeRef.current?.release?.().catch(() => { });
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => { });
-  };
+  useEffect(() => {
+    load();
+    // Refresh when the app comes back to the foreground (e.g. the next day)
+    const onShow = () => { if (document.visibilityState === "visible") load(); };
+    document.addEventListener("visibilitychange", onShow);
+    return () => document.removeEventListener("visibilitychange", onShow);
+  }, []);
 
-  // Stops the recorder (if any) and resolves with the full session audio
-  const stopRecording = () => new Promise((resolve) => {
-    const r = recorderRef.current;
-    if (!r || r.state === "inactive") return resolve(null);
-    r.onstop = () => resolve(new Blob(r.chunks, { type: r.mimeType }));
-    r.stop();
-  });
+  const todo = data ? data.tasks.filter((t) => t.requiredToday) : [];
+  const left = todo.filter((t) => !t.completedToday).length;
+  const allDone = todo.length > 0 && !left;
+  const feeding = allDone && !!pet && (!pet.fedToday || celebrating);
 
-  const start = async () => {
+  useEffect(() => {
+    document.body.classList.toggle("feeding", feeding);
+    return () => document.body.classList.remove("feeding");
+  }, [feeding]);
+
+  useEffect(() => {
+    if (!feeding) return;
+    setTreats(TREAT_COUNT);
+    setFeedMood("hungry");
+    setFeedError("");
+  }, [feeding]);
+
+  const cheer = (ms = 2200) => { setCheering(true); later(() => setCheering(false), ms); };
+
+  // Plain toggle without the high-five: unticking a mis-tap, or re-ticking a task unticked earlier today
+  const toggleQuiet = async (task, done) => {
+    setBusy(task.id);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        // Raw signal: browser noise-suppression would strip guitar tones
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-      });
-      streamRef.current = stream;
-      document.documentElement.requestFullscreen?.().catch(() => { });
-      navigator.wakeLock?.request("screen").then((l) => (wakeRef.current = l)).catch(() => { });
-
-      if (typeof MediaRecorder !== "undefined") {
-        const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
-        const recorder = new MediaRecorder(stream, { mimeType });
-        recorder.chunks = [];
-        recorder.ondataavailable = (e) => { if (e.data.size) recorder.chunks.push(e.data); };
-        recorder.start();
-        recorderRef.current = recorder;
-      }
-
-      const ctx = new AudioContext();
-      ctxRef.current = ctx;
-      if (ctx.state === "suspended") await ctx.resume();
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 4096;
-      ctx.createMediaStreamSource(stream).connect(analyser);
-      const buf = new Float32Array(analyser.fftSize);
-
-      const total = cfg.durationMinutes * 60;
-      Object.assign(state.current, { remaining: total, total, lastActive: 0, streak: 0 });
-      setRemaining(total);
-      setPhase("running");
-
-      let last = performance.now();
-      const tick = async () => {
-        if (!ctxRef.current) return;
-        const now = performance.now(), dt = (now - last) / 1000;
-        last = now;
-        analyser.getFloatTimeDomainData(buf);
-        const { freq, clarity, rms } = detectPitch(buf, ctx.sampleRate, MIN_HZ, MAX_HZ);
-        const s = state.current;
-
-
-        // TEST MODE: count any sound, ignore pitch/clarity filtering
-        // const tonal = rms > MIN_RMS && clarity >= MIN_CLARITY && freq >= MIN_HZ && freq <= MAX_HZ;
-        const tonal = rms > MIN_RMS;
-
-
-        s.streak = tonal ? s.streak + 1 : 0;
-        if (s.streak >= 3) s.lastActive = now;   // 3 consecutive frames = a real note
-
-        const active = now - s.lastActive < HOLD_MS;
-        setListening(active);
-        setHz(active ? Math.round(freq) : 0);
-
-        if (active) {
-          s.remaining = Math.max(0, s.remaining - dt);
-          setRemaining(s.remaining);
-          if (s.remaining === 0) {
-            const recording = await stopRecording();
-            stop(); ctxRef.current = null;
-            try {
-              await completeTask(s.total);
-              if (recording) await uploadRecording(recording).catch(() => {});
-              setPhase("done");
-            }
-            catch (e) { setError(e.message); setPhase("error"); }
-            return;
-          }
-        }
-        setTimeout(tick, 60);
-      };
-      tick();
-    } catch (e) {
-      setError(e.name === "NotAllowedError" ? "Microphone access was blocked. Allow it in the browser's site settings." : e.message);
-      setPhase("error");
-    }
+      if (!done) markUnticked(data.today, task.id);
+      setData(await checkTask(task.id, done));
+      setJustDone(done ? task.id : null);
+      setError("");
+    } catch (e) { setError(e.message); }
+    finally { setBusy(null); }
   };
 
-  if (!cfg && !error) return <main className="page center"><p className="muted">Loading…</p></main>;
+  const onCheck = (task) => {
+    if (task.completedToday) toggleQuiet(task, false);
+    else if (readUnticked(data.today).includes(task.id)) toggleQuiet(task, true);
+    else { setBusy(task.id); setHighFive(task); }
+  };
 
-  if (phase === "done" || cfg?.completedToday)
-    return <main className="page center full done"><h1>Done for today</h1><p>Nice playing. Your can have some other fun!</p></main>;
+  const onSlap = () => {
+    setConfetti((k) => k + 1);
+    cheer();
+    slap.current = checkTask(highFive.id, true);
+    slap.current.catch(() => { });
+  };
 
-  if (phase === "error")
-    return <main className="page center full"><h1>Something went wrong</h1><p className="muted">{error}</p><button className="btn primary" onClick={() => { setError(""); setPhase("idle"); }}>Try again</button></main>;
+  const onSlapDone = async () => {
+    const task = highFive;
+    try {
+      setData(await slap.current);
+      setJustDone(task.id);
+      setError("");
+    } catch (e) { setError(e.message); }
+    finally { setHighFive(null); setBusy(null); }
+  };
 
-  if (cfg && !cfg.requiredToday)
-    return <main className="page center full"><h1>No practice today</h1><p className="muted">Enjoy your day.</p></main>;
+  const claim = async () => {
+    setFeedError("");
+    try {
+      const res = await feedPet();
+      setFeedMood("happy");
+      playFanfare();
+      setConfetti((k) => k + 1);
+      if (res.awarded) later(() => setReward(res), 900);
+      else later(() => { onPet(res); setCelebrating(false); }, 2200);
+    } catch (e) { setFeedError(e.message); }
+  };
 
-  if (phase === "idle")
-    return (
-      <main className="page center full">
-        <h1>{cfg.durationMinutes} minutes of guitar</h1>
-        <p className="muted">The timer only runs while you play. Allow the microphone when asked.</p>
-        <button className="btn primary big" onClick={start}>Start practice</button>
-      </main>
-    );
+  const onFeed = () => {
+    playCrunch();
+    setCelebrating(true);
+    setFeedMood("eat");
+    const remaining = treats - 1;
+    setTreats(remaining);
+    if (remaining > 0) later(() => setFeedMood("hungry"), EAT_MS);
+    else later(claim, EAT_MS);
+  };
+
+  if (!data) return <main className="page center full"><p className="muted">{error || "Ielādē…"}</p></main>;
+
+  const petMood = feeding ? feedMood : highFive || cheering ? "cheer" : allDone ? "happy" : "idle";
 
   return (
-    <main className={`page center full ${listening ? "live" : ""}`}>
-      <div className="timer" aria-live="off">{fmt(remaining)}</div>
-      <p className="muted">{listening ? `Hearing ${hz} Hz` : "Play your guitar to keep the timer going"}</p>
-      <div className="bar"><i style={{ width: `${100 * (1 - remaining / state.current.total)}%` }} /></div>
-    </main>
+    <>
+      <main className={`page child${allDone ? " done" : ""}${feeding ? " faded" : ""}`} aria-hidden={feeding || undefined}>
+        <h1>{!todo.length ? "Šodien nekas nav jādara" : left ? "Šodienas saraksts" : "Viss šodien paveikts!"}</h1>
+        <p className="muted">
+          {!todo.length ? "Izbaudi savu dienu." : left ? `Atlikuši ${left} no ${todo.length}` : "Lieliski. Vari izklaidēties!"}
+        </p>
+        {error && <p className="muted" role="alert">{error}</p>}
+        <ul className="todo">
+          {todo.map((t) => {
+            const tpl = templateOf(t);
+            // Only tasks ticked by hand can be unticked by the child
+            const canToggle = t.completedToday ? t.completedManually : t.allowManual;
+            const label = <><span className="todo-name">{t.name}</span><span className="muted">{tpl?.summary(t)}</span></>;
+            return (
+              <li key={t.id} className={`todo-item${t.completedToday ? " done" : ""}${justDone === t.id ? " pop" : ""}`}>
+                <button className="check" disabled={!canToggle || busy === t.id || !!highFive} aria-pressed={t.completedToday}
+                  aria-label={`${t.completedToday ? "Noņemt atzīmi" : "Atzīmēt"} ${t.name}`}
+                  onClick={() => onCheck(t)} />
+                {tpl?.Runner
+                  ? <button className="todo-open" onClick={() => onOpen(t.id)}>{label}</button>
+                  : <div className="todo-open static">{label}</div>}
+              </li>
+            );
+          })}
+        </ul>
+      </main>
+
+      {feeding && (
+        <div className="feed-stage" role="region" aria-label="Kucēna barošana">
+          <h1 className="feed-title">{feedMood === "happy" ? "Ļoti garšīgi! 🎉" : "Visi uzdevumi paveikti!"}</h1>
+          <p className="feed-sub">
+            {feedMood === "happy" ? "Tu esi lielisks! Saņem 100 monētas!" : "Pabaro savu kucēnu — velc ēdienu pie tā vai pieskaries."}
+          </p>
+          {feedError && (
+            <p className="feed-error" role="alert">{feedError} <button className="btn" onClick={claim}>Mēģināt vēlreiz</button></p>
+          )}
+          {treats > 0 && <FeedBowl petRef={petRef} treats={treats} disabled={feedMood === "eat"} onFeed={onFeed} />}
+        </div>
+      )}
+
+      <div className={`pet-dock${feeding ? " feeding" : ""}`}>
+        <Pet ref={petRef} mood={petMood} />
+      </div>
+
+      {highFive && <HighFive taskName={highFive.name} onSlap={onSlap} onDone={onSlapDone} />}
+      {confetti > 0 && <Confetti key={confetti} onDone={() => setConfetti(0)} />}
+      {reward && <CoinFlight amount={reward.awarded} onFirstLand={() => onPet(reward)} onDone={() => { setReward(null); setCelebrating(false); }} />}
+    </>
   );
 }

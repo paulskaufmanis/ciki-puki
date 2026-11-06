@@ -1,5 +1,5 @@
 // App-shell cache. API calls are never cached.
-const CACHE = "guitar-guard-v1";
+const CACHE = "ciki-puki-v11";
 const SHELL = ["/", "/manifest.json", "/icon.svg"];
 
 self.addEventListener("install", (e) => {
@@ -19,7 +19,7 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(req.url);
   if (req.method !== "GET" || url.origin !== location.origin || url.pathname.startsWith("/api/")) return;
 
-  // Navigations (/parent, /child): network first, fall back to cached shell
+  // Navigations (/, /task/:id, /parent): network first, fall back to cached shell
   if (req.mode === "navigate") {
     e.respondWith(fetch(req).catch(() => caches.match("/")));
     return;

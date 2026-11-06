@@ -1,13 +1,13 @@
 {
-  "name": "guitar-guard",
+  "name": "ciki-puki",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "deploy": "npm run build && wrangler deploy",
-    "db:init": "wrangler d1 execute guitar-guard-db --file=./schema.sql",
-    "db:init:local": "wrangler d1 execute guitar-guard-db --local --file=./schema.sql"
+    "db:init": "wrangler d1 execute guitar-guard-db --remote --file=../backend/schema.sql",
+    "db:init:local": "wrangler d1 execute guitar-guard-db --local --file=../backend/schema.sql"
   },
   "dependencies": {
     "react": "^18.3.1",

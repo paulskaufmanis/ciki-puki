@@ -1,7 +1,7 @@
 {
-  "name": "Guitar Guard",
-  "short_name": "GuitarGuard",
-  "description": "Practice guitar to unlock screen time",
+  "name": "Čiki Puki",
+  "short_name": "Čiki Puki",
+  "description": "Ikdienas ģitāras prakses taimeris",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
@@ -14,7 +14,7 @@
     { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ],
   "shortcuts": [
-    { "name": "Parent dashboard", "url": "/parent", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
-    { "name": "Start practice", "url": "/child", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
+    { "name": "Vecāka panelis", "url": "/parent", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Sākt praksi", "url": "/child", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
   ]
 }

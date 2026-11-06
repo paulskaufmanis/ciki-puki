@@ -15,7 +15,14 @@ binding = "DB"
 database_name = "guitar-guard-db"
 database_id = "4c7e2007-21fb-4444-92c7-7e8d5511742b"
 
+# Practice recordings (too big for D1's 2 MB row limit). Create once: npx wrangler r2 bucket create ciki-puki-audio
+# Disabled until R2 is activated; recordings fall back to D1 (max ~1.9 MB each).
+# [[r2_buckets]]
+# binding = "AUDIO"
+# bucket_name = "ciki-puki-audio"
+
 [vars]
 TIMEZONE = "Europe/Riga"
 
-# Parent PIN (protects POST /api/config):  wrangler secret put PARENT_PIN
+# Tables are created/migrated by the Worker on first request (see backend/schema.sql).
+# Optional fallback parent PIN (protects task create/edit/delete/reset and recordings):  wrangler secret put PARENT_PIN
