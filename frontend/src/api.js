@@ -22,6 +22,9 @@ export const getPet = () => call("/api/pet");
 
 export const feedPet = () => send("POST", "/api/pet/feed", {});
 
+// Parent sets the exact coin balance
+export const setPetCoins = (coins, pin) => send("PUT", "/api/pet/coins", { coins }, pinHeader(pin));
+
 export const getPinStatus = () => call("/api/pin");
 
 export const verifyPin = (pin) => send("POST", "/api/pin/verify", { pin });
@@ -41,7 +44,7 @@ const clearUnticked = () => { try { localStorage.removeItem(UNTICKED_KEY); } cat
 
 export const resetTaskToday = (id, pin) => { clearUnticked(); return send("POST", `/api/tasks/${id}/reset`, {}, pinHeader(pin)); };
 
-export const checkTask = (id, done) => send("POST", `/api/tasks/${id}/check`, { done });
+export const checkTask = (id, done, details) => send("POST", `/api/tasks/${id}/check`, { done, details });
 
 // Parent dashboard variant: sends the PIN so the backend allows checking/unchecking any task by hand
 export const checkTaskAsParent = (id, done, pin) => { clearUnticked(); return send("POST", `/api/tasks/${id}/check`, { done }, pinHeader(pin)); };
@@ -58,6 +61,21 @@ export const completeTask = (id, secondsPracticed) => send("POST", `/api/tasks/$
 
 export const uploadRecording = async (id, blob) => {
   const res = await fetch(`/api/tasks/${id}/recording`, {
+    method: "POST",
+    headers: { "content-type": blob.type || "application/octet-stream" },
+    body: blob,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Ieraksta augšupielāde neizdevās (${res.status})`);
+  }
+};
+
+// Extra practice round after the task is done: resolves with { bonusId, awarded, coins, fedToday }
+export const completeBonus = (id, secondsPracticed) => send("POST", `/api/tasks/${id}/bonus`, { secondsPracticed });
+
+export const uploadBonusRecording = async (bonusId, blob) => {
+  const res = await fetch(`/api/bonus/${bonusId}/recording`, {
     method: "POST",
     headers: { "content-type": blob.type || "application/octet-stream" },
     body: blob,
@@ -86,8 +104,8 @@ export const listRecordings = (pin) => call("/api/recordings", { headers: pinHea
 
 export const listPhotos = (pin) => call("/api/photos", { headers: pinHeader(pin) });
 
-export const fetchRecordingUrl = async (taskId, date, pin) => {
-  const res = await fetch(`/api/recordings/${taskId}/${date}`, { headers: pinHeader(pin) });
+export const fetchRecordingUrl = async (taskId, date, pin, bonusId) => {
+  const res = await fetch(bonusId ? `/api/bonus/${bonusId}/recording` : `/api/recordings/${taskId}/${date}`, { headers: pinHeader(pin) });
   if (!res.ok) throw new Error("Neizdevās ielādēt ierakstu");
   return URL.createObjectURL(await res.blob());
 };

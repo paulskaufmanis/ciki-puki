@@ -5,6 +5,7 @@ export default {
   label: "Instrumenta spēle",
   namePlaceholder: "piem. Ģitāras spēle",
   Runner: InstrumentPractice,
+  noManual: true,
   Settings: InstrumentSettings,
   recordsAudio: true,
   summary: (task) =>

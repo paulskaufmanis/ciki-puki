@@ -70,3 +70,35 @@ export function playFanfare() {
   if (!c) return;
   [523.25, 659.25, 783.99, 659.25, 783.99, 1046.5].forEach((f, i) => tone(c, f, i * 0.12, 0.3, { type: "triangle", gain: 0.2 }));
 }
+
+// A puppy "vau vau": two short barks, a rough falling tone with a breathy burst
+export function playBark() {
+  const c = audio();
+  if (!c) return;
+  [0, 0.24].forEach((at) => {
+    tone(c, 520, at, 0.16, { type: "sawtooth", gain: 0.22, to: 260 });
+    tone(c, 780, at, 0.1, { type: "square", gain: 0.06, to: 400 });
+    noise(c, at, 0.1, { freq: 1100, gain: 0.25 });
+  });
+}
+
+// A springy "boing" for the somersault
+export function playBoing() {
+  const c = audio();
+  if (!c) return;
+  tone(c, 260, 0, 0.35, { type: "sine", gain: 0.25, to: 720 });
+}
+
+// Quick scratchy rustle while the puppy scratches behind its ear
+export function playScratch() {
+  const c = audio();
+  if (!c) return;
+  for (let i = 0; i < 5; i++) noise(c, i * 0.1, 0.06, { freq: 2600, gain: 0.18 });
+}
+
+// Soft slurp while licking a paw
+export function playLick() {
+  const c = audio();
+  if (!c) return;
+  [0, 0.3, 0.6].forEach((at) => tone(c, 420, at, 0.12, { type: "sine", gain: 0.12, to: 640 }));
+}

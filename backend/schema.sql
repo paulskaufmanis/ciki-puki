@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS task_logs (
   completed_at TEXT    NOT NULL DEFAULT (datetime('now')),
   seconds      INTEGER NOT NULL DEFAULT 0,
   manual       INTEGER NOT NULL DEFAULT 0,                 -- 1 = ticked off by hand
+  details      TEXT,                                       -- JSON array of what the child did (simple tasks with requireDetails)
   PRIMARY KEY (task_id, date)
 );
 
@@ -44,6 +45,19 @@ CREATE TABLE IF NOT EXISTS task_recordings (
   bytes      INTEGER NOT NULL,
   created_at TEXT    NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (task_id, date)
+);
+
+-- One row per extra practice round after the daily task is done (each pays coins). Its own audio is in R2 ("taskId/date/bonus-id")
+-- or, without R2, in `audio`
+CREATE TABLE IF NOT EXISTS task_bonus (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id    INTEGER NOT NULL,
+  date       TEXT    NOT NULL,
+  seconds    INTEGER NOT NULL DEFAULT 0,
+  mime_type  TEXT    NOT NULL DEFAULT '',
+  audio      BLOB    NOT NULL DEFAULT x'',
+  bytes      INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Photo evidence: one JPEG per photo task per day (stored inline; move to R2 if photos get large)

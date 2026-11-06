@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { completeTask, uploadRecording, saveProgress } from "../../api.js";
+import { completeTask, completeBonus, uploadRecording, uploadBonusRecording, saveProgress } from "../../api.js";
 import { detectPitch } from "../../pitch.js";
 import Metronome from "./Metronome.jsx";
 
@@ -33,8 +33,9 @@ export const durationLabel = (secs) => {
 const SAVE_EVERY_MS = 5000;
 const RECORDING_BITRATE = 12000; // mono Opus at 12 kbps ≈ 1.8 MB per 20 minutes (fits a D1 row without R2)
 
-export default function InstrumentPractice({ task, onDone, onBack }) {
+export default function InstrumentPractice({ task, onDone, onBonus, onBack }) {
     const [phase, setPhase] = useState("idle");   // idle | running | done | error
+    const [bonus, setBonus] = useState(false);    // an extra round after the task is done (earns coins)
     const [remaining, setRemaining] = useState(0);
     const [hz, setHz] = useState(0);
     const [listening, setListening] = useState(false);
@@ -49,7 +50,7 @@ export default function InstrumentPractice({ task, onDone, onBack }) {
 
     const persist = () => {
         const s = state.current;
-        if (!s.running) return;
+        if (!s.running || s.bonus) return; // bonus rounds don't touch the daily progress
         s.played = s.total - s.remaining;
         saveProgress(task.id, s.played);
     };
@@ -76,7 +77,7 @@ export default function InstrumentPractice({ task, onDone, onBack }) {
         r.stop();
     });
 
-    const start = async () => {
+    const start = async (isBonus = false) => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
                 // Raw signal: browser noise-suppression would strip instrument tones
@@ -103,8 +104,8 @@ export default function InstrumentPractice({ task, onDone, onBack }) {
             const buf = new Float32Array(analyser.fftSize);
 
             const total = task.targetSeconds;
-            const remainingStart = Math.max(0, total - loadPlayed());
-            Object.assign(state.current, { remaining: remainingStart, total, lastActive: 0, streak: 0, lastSave: 0, running: true });
+            const remainingStart = isBonus ? total : Math.max(0, total - loadPlayed());
+            Object.assign(state.current, { remaining: remainingStart, total, lastActive: 0, streak: 0, lastSave: 0, running: true, bonus: isBonus });
             setRemaining(remainingStart);
             setPhase("running");
 
@@ -136,10 +137,18 @@ export default function InstrumentPractice({ task, onDone, onBack }) {
                     const recording = await stopRecording();
                     stop(); ctxRef.current = null;
                     try {
-                        await completeTask(task.id, s.total);
-                        if (recording) await uploadRecording(task.id, recording).catch((e) => setUploadError(e.message));
-                        setPhase("done");
-                        onDone?.();
+                        if (s.bonus) {
+                            const result = await completeBonus(task.id, s.total);
+                            if (recording) await uploadBonusRecording(result.bonusId, recording).catch((e) => setUploadError(e.message));
+                            setBonus(false);
+                            setPhase("done");
+                            onBonus?.(result);
+                        } else {
+                            await completeTask(task.id, s.total);
+                            if (recording) await uploadRecording(task.id, recording).catch((e) => setUploadError(e.message));
+                            setPhase("done");
+                            onDone?.();
+                        }
                     }
                     catch (e) { setError(e.message); setPhase("error"); }
                     return;
@@ -155,11 +164,26 @@ export default function InstrumentPractice({ task, onDone, onBack }) {
 
     const back = <button className="btn" onClick={onBack}>Atpakaļ uz sarakstu</button>;
 
-    if (phase === "done" || task.completedToday)
-        return <main className="page center full done"><h1>{task.name} – gatavs!</h1><p>Lieliski nospēlēts.</p>{uploadError && <p className="muted" role="alert">Ierakstu neizdevās saglabāt: {uploadError}</p>}<button className="btn primary big" onClick={onBack}>Atpakaļ uz sarakstu</button></main>;
+    // After the daily task is done the child can play again for 100 extra coins
+    const canBonus = task.requiredToday && task.targetSeconds > 0;
+    const startBonus = () => { setUploadError(""); setBonus(true); start(true); };
+    const finished = !bonus && (phase === "done" || task.completedToday);
+
+    if (finished)
+        return (
+            <main className="page center full done">
+                <h1>{task.name} – gatavs!</h1>
+                <p>Lieliski nospēlēts.</p>
+                {uploadError && <p className="muted" role="alert">Ierakstu neizdevās saglabāt: {uploadError}</p>}
+                <div className="row done-actions">
+                    <button className="btn primary big" onClick={onBack}>Atpakaļ uz sarakstu</button>
+                    {canBonus && <button className="btn big bonus-btn" onClick={startBonus}>Nopelnīt 100 žetonus</button>}
+                </div>
+            </main>
+        );
 
     if (phase === "error")
-        return <main className="page center full"><h1>Kaut kas nogāja greizi</h1><p className="muted">{error}</p><div className="row"><button className="btn primary" onClick={() => { setError(""); setPhase("idle"); }}>Mēģināt vēlreiz</button>{back}</div></main>;
+        return <main className="page center full"><h1>Kaut kas nogāja greizi</h1><p className="muted">{error}</p><div className="row"><button className="btn primary" onClick={() => { setError(""); setBonus(false); setPhase("idle"); }}>Mēģināt vēlreiz</button>{back}</div></main>;
 
     if (!task.requiredToday)
         return <main className="page center full"><h1>Nav šodienas sarakstā</h1><p className="muted">Izbaudi savu dienu.</p>{back}</main>;
@@ -174,7 +198,7 @@ export default function InstrumentPractice({ task, onDone, onBack }) {
                 {resuming
                     ? <p className="muted">Laipni lūdzam atpakaļ! Atlikušas {fmt(left)} no vietas, kur pārtrauci.</p>
                     : <p className="muted">Taimeris darbojas tikai, kamēr tu spēlē.</p>}
-                <button className="btn primary big" onClick={start}>{resuming ? "Turpināt" : "Sākt"}</button>
+                <button className="btn primary big" onClick={() => start()}>{resuming ? "Turpināt" : "Sākt"}</button>
                 <p>{back}</p>
             </main>
         );
@@ -183,7 +207,8 @@ export default function InstrumentPractice({ task, onDone, onBack }) {
     return (
         <main className={`page center full ${listening ? "live" : ""}`}>
             <div className="timer" aria-live="off">{fmt(remaining)}</div>
-            <p className="muted">{listening ? `Dzirdu ${hz} Hz` : "Spēlē uz sava instrumenta, lai taimeris turpinātu darboties"}</p>
+            <p className="muted">{listening ? `Dzirdu ${hz} Hz` : "Spēlē savu instrumentu, lai taimeris turpinātu darboties"}</p>
+            {bonus && <p className="bonus-tag">Papildu kārta: +100 žetoni</p>}
             <div className="bar"><i style={{ width: `${100 * (1 - remaining / state.current.total)}%` }} /></div>
             <Metronome />
         </main>

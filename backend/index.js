@@ -21,8 +21,11 @@ const intIn = (v, min, max, message) => {
 
 // Task template types. To add one (homework, chores…) add an entry here and a matching one in frontend/src/templates.
 // parseParams validates the template's own settings; targetSeconds is the timed work that completes it (0 = check-off only).
+// noManual: the child can never tick the task off by hand; only the runner (practice timer, photo upload) completes it.
 const TEMPLATES = {
   instrument: {
+    noManual: true,
+    bonusRounds: true, // once done, the child can practise again for extra coins (see postBonus)
     defaults: { durationMinutes: 10, micLevel: 1 },
     parseParams: (p) => ({
       durationMinutes: intIn(p.durationMinutes, 0, 240, "Duration must be 0-240"),
@@ -32,20 +35,44 @@ const TEMPLATES = {
   },
   // Completed by uploading a photo taken today (see postPhoto)
   photo: {
+    noManual: true,
     defaults: {},
     manualDefault: false,
     parseParams: () => ({}),
     targetSeconds: () => 0,
   },
-  // Ticked off from the list
+  // Ticked off from the list; with requireDetails the child lists what they did (stored in task_logs.details)
+  // detailOptions, if set, restricts each item to one pick from a parent-defined list (no repeats)
   simple: {
-    defaults: {},
+    defaults: { requireDetails: false, detailOptions: [] },
     checkOnly: true,
-    parseParams: () => ({}),
+    parseParams: (p) => ({ requireDetails: p.requireDetails === true, detailOptions: cleanOptions(p.detailOptions) }),
     targetSeconds: () => 0,
+    checkDetails: (p, details) => (p.requireDetails ? cleanDetails(details, p.detailOptions) : null),
   },
 };
 const templateOf = (key) => (Object.hasOwn(TEMPLATES, key) ? TEMPLATES[key] : null);
+
+const MAX_DETAILS = 20, MAX_DETAIL_LENGTH = 100;
+
+function cleanOptions(v) {
+  const list = (Array.isArray(v) ? v : []).map((d) => String(d ?? "").trim()).filter(Boolean);
+  if (list.length > MAX_DETAILS || list.some((d) => d.length > MAX_DETAIL_LENGTH))
+    fail(400, `Līdz ${MAX_DETAILS} variantiem, katrs līdz ${MAX_DETAIL_LENGTH} rakstzīmēm`);
+  return [...new Set(list)];
+}
+
+function cleanDetails(v, options) {
+  const list = (Array.isArray(v) ? v : []).map((d) => String(d ?? "").trim()).filter(Boolean);
+  if (!list.length) fail(400, "Pieraksti vismaz vienu paveikto darbu");
+  if (list.length > MAX_DETAILS || list.some((d) => d.length > MAX_DETAIL_LENGTH))
+    fail(400, `Līdz ${MAX_DETAILS} ierakstiem, katrs līdz ${MAX_DETAIL_LENGTH} rakstzīmēm`);
+  if (options?.length) {
+    if (new Set(list).size !== list.length) fail(400, "Katru variantu drīkst izvēlēties tikai vienreiz");
+    if (list.some((d) => !options.includes(d))) fail(400, "Izvēlies no piedāvātajiem variantiem");
+  }
+  return list;
+}
 
 const DEFAULT_DAYS = [1, 2, 3, 4, 5];
 
@@ -76,6 +103,7 @@ const SCHEMA = [
     completed_at TEXT    NOT NULL DEFAULT (datetime('now')),
     seconds      INTEGER NOT NULL DEFAULT 0,
     manual       INTEGER NOT NULL DEFAULT 0,
+    details      TEXT,
     PRIMARY KEY (task_id, date)
   )`,
   `CREATE TABLE IF NOT EXISTS task_progress (
@@ -93,6 +121,16 @@ const SCHEMA = [
     bytes      INTEGER NOT NULL,
     created_at TEXT    NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (task_id, date)
+  )`,
+  `CREATE TABLE IF NOT EXISTS task_bonus (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    INTEGER NOT NULL,
+    date       TEXT    NOT NULL,
+    seconds    INTEGER NOT NULL DEFAULT 0,
+    mime_type  TEXT    NOT NULL DEFAULT '',
+    audio      BLOB    NOT NULL DEFAULT x'',
+    bytes      INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
   )`,
   `CREATE TABLE IF NOT EXISTS task_photos (
     task_id    INTEGER NOT NULL,
@@ -136,10 +174,17 @@ async function migrateLegacy(db) {
   await db.batch(steps);
 }
 
+// Columns added after release, for databases created before them
+async function migrateColumns(db) {
+  const { results } = await db.prepare("PRAGMA table_info(task_logs)").all();
+  if (!results.some((c) => c.name === "details")) await db.prepare("ALTER TABLE task_logs ADD COLUMN details TEXT").run();
+}
+
 let schemaReady = null;
 function ensureSchema(env) {
   schemaReady ||= (async () => {
     await env.DB.batch(SCHEMA.map((sql) => env.DB.prepare(sql)));
+    await migrateColumns(env.DB);
     await migrateLegacy(env.DB);
   })().catch((e) => { schemaReady = null; throw e; });
   return schemaReady;
@@ -156,13 +201,14 @@ function toView(r, weekday) {
     params,
     scheduledDays,
     enabled: !!r.enabled,
-    allowManual: !!r.allow_manual || !!tpl?.checkOnly,
+    allowManual: !tpl?.noManual && (!!r.allow_manual || !!tpl?.checkOnly),
     targetSeconds: tpl ? tpl.targetSeconds(params) : 0,
     requiredToday: !!r.enabled && scheduledDays.includes(weekday),
     completedToday: !!r.done_date,
     completedManually: !!r.done_manual,
     progressSeconds: r.progress || 0,
     hasPhotoToday: !!r.photo_bytes,
+    detailsToday: r.done_details ? JSON.parse(r.done_details) : null,
   };
 }
 
@@ -170,7 +216,7 @@ async function loadTasks(env) {
   await ensureSchema(env);
   const { date, weekday } = localNow(env.TIMEZONE || "UTC");
   const { results } = await env.DB.prepare(`
-    SELECT t.*, l.date AS done_date, l.manual AS done_manual, p.seconds AS progress, ph.bytes AS photo_bytes
+    SELECT t.*, l.date AS done_date, l.manual AS done_manual, l.details AS done_details, p.seconds AS progress, ph.bytes AS photo_bytes
     FROM tasks t
     LEFT JOIN task_logs l ON l.task_id = t.id AND l.date = ?1
     LEFT JOIN task_progress p ON p.task_id = t.id AND p.date = ?1
@@ -204,7 +250,7 @@ async function createTask(request, env) {
   const b = await readBody(request);
   const tpl = templateOf(b.template) || fail(400, "Nezināms uzdevuma tips");
   const params = tpl.parseParams({ ...tpl.defaults, ...b.params });
-  const allowManual = typeof b.allowManual === "boolean" ? b.allowManual : tpl.manualDefault !== false;
+  const allowManual = !tpl.noManual && (typeof b.allowManual === "boolean" ? b.allowManual : tpl.manualDefault !== false);
   await env.DB.prepare("INSERT INTO tasks (template, name, params, scheduled_days, enabled, allow_manual) VALUES (?, ?, ?, ?, ?, ?)")
     .bind(b.template, cleanName(b.name), JSON.stringify(params), parseDays(b.scheduledDays ?? DEFAULT_DAYS),
       b.enabled === false ? 0 : 1, +allowManual)
@@ -239,7 +285,7 @@ async function deleteTask(request, env, id) {
   if (denied) return denied;
   await loadTask(env, id);
   await env.DB.batch([
-    ...["task_logs", "task_progress", "task_recordings", "task_photos"].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE task_id = ?`).bind(id)),
+    ...["task_logs", "task_progress", "task_recordings", "task_photos", "task_bonus"].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE task_id = ?`).bind(id)),
     env.DB.prepare("DELETE FROM tasks WHERE id = ?").bind(id),
   ]);
   for (let cursor; env.AUDIO;) {
@@ -281,7 +327,7 @@ async function postComplete(request, env, id) {
 async function postCheck(request, env, id) {
   const { today, task } = await loadTask(env, id);
   if (!task.requiredToday) fail(409, "Šis uzdevums šodien nav ieplānots");
-  const { done } = await readBody(request);
+  const { done, details } = await readBody(request);
   const isParent = request.headers.get("x-parent-pin") !== null;
   if (isParent) {
     const denied = await requirePin(request, env);
@@ -289,10 +335,11 @@ async function postCheck(request, env, id) {
   }
   if (done) {
     if (!isParent && !task.allowManual) fail(403, "Šo uzdevumu nevar atzīmēt ar roku");
-    await env.DB.prepare("INSERT OR IGNORE INTO task_logs (task_id, date, seconds, manual) VALUES (?, ?, ?, 1)")
-      .bind(id, today, task.progressSeconds).run();
+    const list = isParent && !details ? null : templateOf(task.template)?.checkDetails?.(task.params, details);
+    await env.DB.prepare("INSERT OR IGNORE INTO task_logs (task_id, date, seconds, manual, details) VALUES (?, ?, ?, 1, ?)")
+      .bind(id, today, task.progressSeconds, list ? JSON.stringify(list) : null).run();
   } else if (task.completedToday) {
-    if (!isParent && !task.completedManually) fail(409, "Var noņemt atzīmi tikai uzdevumiem, kas atzīmēti ar roku");
+    if (!isParent && !(task.completedManually && task.allowManual)) fail(409, "Var noņemt atzīmi tikai uzdevumiem, kas atzīmēti ar roku");
     // Unchecking clears today's timed progress too, so the child starts the task over from the beginning
     await env.DB.batch([
       env.DB.prepare("DELETE FROM task_logs WHERE task_id = ? AND date = ?").bind(id, today),
@@ -303,7 +350,28 @@ async function postCheck(request, env, id) {
 }
 
 // Coin balance and the date the pet was last fed live in app_meta ('coins', 'fed_date')
-const DAILY_REWARD_COINS = 100;
+const DAILY_REWARD_COINS = 20;
+const BONUS_REWARD_COINS = 100;
+
+const addCoins = (env, n) =>
+  env.DB.prepare(
+    "INSERT INTO app_meta (key, value) VALUES ('coins', ?1) ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + CAST(excluded.value AS INTEGER)"
+  ).bind(String(n)).run();
+
+// Extra practice round after the task is done: pays coins every time and keeps its own recording (see postBonusRecording)
+async function postBonus(request, env, id) {
+  const { today, task } = await loadTask(env, id);
+  if (!templateOf(task.template)?.bonusRounds) fail(400, "Šim uzdevumam nav papildu kārtu");
+  if (!task.requiredToday) fail(409, "Šis uzdevums šodien nav ieplānots");
+  if (!task.completedToday) fail(409, "Vispirms paveic šodienas uzdevumu");
+  const b = await readBody(request);
+  const secs = Math.max(0, Math.min(Number(b.secondsPracticed) || 0, 86400));
+  if (secs < task.targetSeconds - 5) fail(400, "Nepietiek prakses laika");
+  const row = await env.DB.prepare("INSERT INTO task_bonus (task_id, date, seconds) VALUES (?, ?, ?) RETURNING id")
+    .bind(id, today, Math.round(secs)).first();
+  await addCoins(env, BONUS_REWARD_COINS);
+  return json({ bonusId: row.id, awarded: BONUS_REWARD_COINS, ...(await loadPet(env)) });
+}
 
 async function loadPet(env) {
   await ensureSchema(env);
@@ -327,6 +395,18 @@ async function postFeedPet(env) {
   ]);
   const awarded = res[0].meta.changes > 0 ? DAILY_REWARD_COINS : 0;
   return json({ ...(await loadPet(env)), awarded });
+}
+
+// Parent override of the coin balance (e.g. after the child spends coins on a reward)
+async function putPetCoins(request, env) {
+  const denied = await requirePin(request, env);
+  if (denied) return denied;
+  const b = await readBody(request);
+  const coins = intIn(b.coins, 0, 1_000_000, "Žetonu skaitam jābūt veselam skaitlim no 0 līdz 1 000 000");
+  await ensureSchema(env);
+  await env.DB.prepare("INSERT INTO app_meta (key, value) VALUES ('coins', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .bind(String(coins)).run();
+  return json(await loadPet(env));
 }
 
 const MAX_RECORDING_BYTES = 15 * 1024 * 1024; // cap one session's audio at 15 MB
@@ -397,23 +477,64 @@ async function postReset(request, env, id) {
   const denied = await requirePin(request, env);
   if (denied) return denied;
   const { today } = await loadTask(env, id);
-  await env.DB.batch(["task_logs", "task_progress", "task_recordings", "task_photos"].map((t) =>
+  await env.DB.batch(["task_logs", "task_progress", "task_recordings", "task_photos", "task_bonus"].map((t) =>
     env.DB.prepare(`DELETE FROM ${t} WHERE task_id = ? AND date = ?`).bind(id, today)));
   await env.AUDIO?.delete(audioKey(id, today));
+  for (let cursor; env.AUDIO;) {
+    const page = await env.AUDIO.list({ prefix: `${id}/${today}/`, cursor });
+    if (page.objects.length) await env.AUDIO.delete(page.objects.map((o) => o.key));
+    if (!page.truncated) break;
+    cursor = page.cursor;
+  }
   return json(await loadTasks(env));
 }
 
 const audioKey = (taskId, date) => `${taskId}/${date}`;
+const bonusAudioKey = (taskId, date, bonusId) => `${taskId}/${date}/bonus-${bonusId}`;
 
-async function postRecording(request, env, id) {
+// Reads and validates an uploaded session recording from the request
+async function readAudio(request) {
   const len = Number(request.headers.get("content-length") || 0);
-  if (len > MAX_RECORDING_BYTES) return json({ error: "Ieraksts ir pārāk liels" }, 413);
-  const { today } = await loadTask(env, id);
+  if (len > MAX_RECORDING_BYTES) fail(413, "Ieraksts ir pārāk liels");
   const buf = await request.arrayBuffer();
-  if (buf.byteLength > MAX_RECORDING_BYTES) return json({ error: "Ieraksts ir pārāk liels" }, 413);
+  if (buf.byteLength > MAX_RECORDING_BYTES) fail(413, "Ieraksts ir pārāk liels");
   const type = request.headers.get("content-type") || "";
   // Only audio types: this value is served back as Content-Type
   const mimeType = /^audio\/[\w.+-]+(;\s*codecs=[\w.,"-]+)?$/i.test(type) ? type : "audio/webm";
+  return { buf, mimeType };
+}
+
+// Each bonus round has its own recording, uploaded once right after the round (so one day can hold several)
+async function postBonusRecording(request, env, bonusId) {
+  await ensureSchema(env);
+  const bonus = await env.DB.prepare("SELECT task_id AS taskId, date, bytes FROM task_bonus WHERE id = ?").bind(bonusId).first()
+    || fail(404, "Nav atrasts");
+  if (bonus.bytes) fail(409, "Šim ierakstam audio jau ir saglabāts");
+  const { buf, mimeType } = await readAudio(request);
+  if (env.AUDIO) await env.AUDIO.put(bonusAudioKey(bonus.taskId, bonus.date, bonusId), buf, { httpMetadata: { contentType: mimeType } });
+  else if (buf.byteLength > MAX_D1_AUDIO_BYTES) return json({ error: "Ieraksts ir pārāk garš, lai to saglabātu" }, 413);
+  await env.DB.prepare("UPDATE task_bonus SET mime_type = ?, audio = ?, bytes = ? WHERE id = ?")
+    .bind(mimeType, env.AUDIO ? new Uint8Array(0) : buf, buf.byteLength, bonusId).run();
+  return json({ ok: true });
+}
+
+async function getBonusRecording(request, env, bonusId) {
+  const denied = await requirePin(request, env);
+  if (denied) return denied;
+  await ensureSchema(env);
+  const row = await env.DB.prepare("SELECT task_id AS taskId, date, mime_type AS mimeType, bytes FROM task_bonus WHERE id = ?").bind(bonusId).first();
+  if (!row || !row.bytes) return json({ error: "Nav atrasts" }, 404);
+  const headers = { "content-type": row.mimeType, "cache-control": "no-store", "x-content-type-options": "nosniff" };
+  const obj = await env.AUDIO?.get(bonusAudioKey(row.taskId, row.date, bonusId));
+  if (obj) return new Response(obj.body, { headers });
+  const legacy = await env.DB.prepare("SELECT audio FROM task_bonus WHERE id = ?").bind(bonusId).first();
+  if (!legacy?.audio?.length && !legacy?.audio?.byteLength) return json({ error: "Nav atrasts" }, 404);
+  return new Response(new Uint8Array(legacy.audio), { headers });
+}
+
+async function postRecording(request, env, id) {
+  const { today } = await loadTask(env, id);
+  const { buf, mimeType } = await readAudio(request);
   if (env.AUDIO) await env.AUDIO.put(audioKey(id, today), buf, { httpMetadata: { contentType: mimeType } });
   else if (buf.byteLength > MAX_D1_AUDIO_BYTES) return json({ error: "Ieraksts ir pārāk garš, lai to saglabātu" }, 413);
   await env.DB.prepare(
@@ -427,9 +548,13 @@ async function listRecordings(request, env) {
   if (denied) return denied;
   await ensureSchema(env);
   const { results } = await env.DB.prepare(`
-    SELECT r.task_id AS taskId, t.name AS taskName, r.date, r.mime_type AS mimeType, r.bytes, r.created_at AS createdAt
+    SELECT r.task_id AS taskId, t.name AS taskName, r.date, r.mime_type AS mimeType, r.bytes, r.created_at AS createdAt, NULL AS bonusId
     FROM task_recordings r JOIN tasks t ON t.id = r.task_id
-    ORDER BY r.date DESC, t.name
+    UNION ALL
+    SELECT b.task_id, t.name, b.date, b.mime_type, b.bytes, b.created_at, b.id
+    FROM task_bonus b JOIN tasks t ON t.id = b.task_id
+    WHERE b.bytes > 0
+    ORDER BY date DESC, taskName, createdAt
   `).all();
   return json(results);
 }
@@ -511,7 +636,7 @@ async function getPhoto(request, env, taskId, date) {
   });
 }
 
-const TASK_ACTIONS = { progress: postProgress, complete: postComplete, check: postCheck, reset: postReset, recording: postRecording, photo: postPhoto };
+const TASK_ACTIONS = { progress: postProgress, complete: postComplete, bonus: postBonus, check: postCheck, reset: postReset, recording: postRecording, photo: postPhoto };
 
 export default {
   async fetch(request, env) {
@@ -519,6 +644,7 @@ export default {
     const method = request.method;
     const taskMatch = pathname.match(/^\/api\/tasks\/([0-9]+)(?:\/([a-z]+))?$/);
     const recordingMatch = pathname.match(/^\/api\/recordings\/([0-9]+)\/([0-9]{4}-[0-9]{2}-[0-9]{2})$/);
+    const bonusMatch = pathname.match(/^\/api\/bonus\/([0-9]+)\/recording$/);
     const photoMatch = pathname.match(/^\/api\/photos\/([0-9]+)\/([0-9]{4}-[0-9]{2}-[0-9]{2})$/);
     try {
       if (pathname === "/api/tasks" && method === "GET") return json(await loadTasks(env));
@@ -530,12 +656,15 @@ export default {
         if (action && method === "POST" && Object.hasOwn(TASK_ACTIONS, action)) return await TASK_ACTIONS[action](request, env, id);
       }
       if (pathname === "/api/pet" && method === "GET") return json(await loadPet(env));
+      if (pathname === "/api/pet/coins" && method === "PUT") return await putPetCoins(request, env);
       if (pathname === "/api/pet/feed" && method === "POST") return await postFeedPet(env);
       if (pathname === "/api/pin" && method === "GET") return await getPinStatus(env);
       if (pathname === "/api/pin" && method === "POST") return await postPinSet(request, env);
       if (pathname === "/api/pin/verify" && method === "POST") return await postPinVerify(request, env);
       if (pathname === "/api/recordings" && method === "GET") return await listRecordings(request, env);
       if (pathname === "/api/photos" && method === "GET") return await listPhotos(request, env);
+      if (bonusMatch && method === "POST") return await postBonusRecording(request, env, Number(bonusMatch[1]));
+      if (bonusMatch && method === "GET") return await getBonusRecording(request, env, Number(bonusMatch[1]));
       if (recordingMatch && method === "GET") return await getRecording(request, env, Number(recordingMatch[1]), recordingMatch[2]);
       if (photoMatch && method === "GET") return await getPhoto(request, env, Number(photoMatch[1]), photoMatch[2]);
       if (pathname.startsWith("/api/")) return json({ error: "Nav atrasts" }, 404);

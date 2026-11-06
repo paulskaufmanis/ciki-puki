@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { getTasks, createTask, updateTask, deleteTask, checkTaskAsParent, listRecordings, listPhotos, fetchRecordingUrl, fetchPhotoUrl, setPin } from "./api.js";
+import { getTasks, createTask, updateTask, deleteTask, checkTaskAsParent, listRecordings, listPhotos, fetchRecordingUrl, fetchPhotoUrl, setPin, getPet, setPetCoins } from "./api.js";
 import { TEMPLATES, templateOf } from "./templates/index.js";
 
 // Mon-Sun display order; values are JS weekday numbers (0 = Sun)
@@ -55,7 +55,7 @@ function TaskEditor({ task, pin, onData, onFail }) {
           <span>Uzdevums ir {form.enabled ? "ieslēgts" : "izslēgts"}</span>
         </label>
 
-        {!tpl?.checkOnly && (
+        {!tpl?.checkOnly && !tpl?.noManual && (
           <label className="switch">
             <input type="checkbox" checked={form.allowManual} onChange={(e) => setForm({ ...form, allowManual: e.target.checked })} />
             <span>Bērns to var atzīmēt pats ar roku</span>
@@ -134,6 +134,24 @@ export default function Parent({ pin, onPinChanged, onAuthFailed, onExit }) {
   const [photos, setPhotos] = useState([]);
   const [photosErr, setPhotosErr] = useState("");
 
+  const [coins, setCoins] = useState(null);       // saved balance
+  const [coinInput, setCoinInput] = useState(""); // value being edited
+  const [coinMsg, setCoinMsg] = useState("");
+
+  useEffect(() => {
+    getPet().then((p) => { setCoins(p.coins); setCoinInput(String(p.coins)); }).catch((e) => setCoinMsg(e.message));
+  }, []);
+
+  const saveCoins = async (e) => {
+    e.preventDefault();
+    try {
+      const p = await setPetCoins(Number(coinInput), pin);
+      setCoins(p.coins);
+      setCoinInput(String(p.coins));
+      setCoinMsg("Saglabāts");
+    } catch (err) { fail(err, setCoinMsg); }
+  };
+
   const loadPhotos = async () => {
     try { setPhotos(await listPhotos(pinRef.current)); setPhotosErr(""); }
     catch (e) { fail(e, setPhotosErr); }
@@ -151,10 +169,12 @@ export default function Parent({ pin, onPinChanged, onAuthFailed, onExit }) {
     } catch (e) { fail(e, setPinMsg); }
   };
 
+  const recKey = (r) => (r.bonusId ? `${r.taskId}/${r.date}/b${r.bonusId}` : `${r.taskId}/${r.date}`);
+
   const playRecording = async (r, place) => {
-    const key = `${r.taskId}/${r.date}`;
+    const key = recKey(r);
     try {
-      urlsRef.current[key] ||= await fetchRecordingUrl(r.taskId, r.date, pin);
+      urlsRef.current[key] ||= await fetchRecordingUrl(r.taskId, r.date, pin, r.bonusId);
       setPlayer({ place, key, url: urlsRef.current[key] });
     } catch (e) { setRecErr(e.message); }
   };
@@ -213,8 +233,7 @@ export default function Parent({ pin, onPinChanged, onAuthFailed, onExit }) {
           <h2>Šodien</h2>
           <ul className="quick">
             {todo.map((t) => {
-              const rec = templateOf(t)?.recordsAudio && recordings.find((r) => r.taskId === t.id && r.date === data.today);
-              const url = rec && playerAt("today", `${rec.taskId}/${rec.date}`);
+              const recs = templateOf(t)?.recordsAudio ? recordings.filter((r) => r.taskId === t.id && r.date === data.today) : [];
               return (
                 <li key={t.id} className={t.completedToday ? "done" : ""}>
                   <button className="mark" disabled={busy === t.id} aria-pressed={t.completedToday}
@@ -226,9 +245,20 @@ export default function Parent({ pin, onPinChanged, onAuthFailed, onExit }) {
                   </span>
                   {templateOf(t)?.photoEvidence && t.hasPhotoToday &&
                     <button className="btn" onClick={() => viewPhoto(t.id, data.today, t.name)}>Skatīt attēlu</button>}
-                  {rec && (url
-                    ? <audio controls autoPlay src={url} />
-                    : <button className="btn" onClick={() => playRecording(rec, "today")}>Atskaņot</button>)}
+                  {recs.length > 0 && (
+                    <div className="rec-stack">
+                      {recs.map((rec) => {
+                        const url = playerAt("today", recKey(rec));
+                        return url
+                          ? <audio key={recKey(rec)} controls autoPlay src={url} />
+                          : <button key={recKey(rec)} className="btn" onClick={() => playRecording(rec, "today")}>
+                            {rec.bonusId ? `Atskaņot papildu ierakstu ${recs.filter((x) => x.bonusId).indexOf(rec) + 1}` : "Atskaņot"}
+                          </button>;
+                      })}
+                    </div>
+                  )}
+                  {t.completedToday && t.detailsToday &&
+                    <ul className="detail-list">{t.detailsToday.map((d, i) => <li key={i}>{d}</li>)}</ul>}
                 </li>
               );
             })}
@@ -267,10 +297,10 @@ export default function Parent({ pin, onPinChanged, onAuthFailed, onExit }) {
         {recErr && <p className="muted">{recErr}</p>}
         <ul className="recordings">
           {recordings.map((r) => {
-            const key = `${r.taskId}/${r.date}`;
+            const key = recKey(r);
             return (
               <li key={key}>
-                <span>{r.date} · {r.taskName}</span>
+                <span>{r.date} · {r.taskName}{r.bonusId ? " · papildu kārta" : ""}</span>
                 {playerAt("list", key)
                   ? <audio controls autoPlay src={playerAt("list", key)} />
                   : <button className="btn" onClick={() => playRecording(r, "list")}>Atskaņot</button>}
@@ -294,6 +324,16 @@ export default function Parent({ pin, onPinChanged, onAuthFailed, onExit }) {
           ))}
           {!photos.length && <p className="muted">Pagaidām nav attēlu</p>}
         </ul>
+      </section>
+
+      <section className="card">
+        <h2>Žetoni</h2>
+        <form onSubmit={saveCoins} className="coin-form">
+          <input type="number" inputMode="numeric" min="0" max="1000000" step="1" required value={coinInput}
+            aria-label="Žetonu skaits" onChange={(e) => { setCoinInput(e.target.value); setCoinMsg(""); }} />
+          <button className="btn primary" disabled={coins === null}>Saglabāt</button>
+          <span className="muted"> {coinMsg}</span>
+        </form>
       </section>
 
       <section className="card">

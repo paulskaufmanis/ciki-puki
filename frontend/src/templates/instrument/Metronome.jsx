@@ -8,6 +8,17 @@ const SIGS = [1, 2, 3, 4]; // 1/4, 2/4, 3/4, 4/4
 
 const clampBpm = (n) => Math.min(BPM_MAX, Math.max(BPM_MIN, Math.round(n)));
 
+const DEFAULT_BPM = 100;
+const BPM_KEY = "ciki-metronome-bpm";
+
+// The last tempo the child picked on this device, or the default for a first visit
+function loadBpm() {
+  try {
+    const saved = Number(localStorage.getItem(BPM_KEY));
+    return saved ? clampBpm(saved) : DEFAULT_BPM;
+  } catch { return DEFAULT_BPM; }
+}
+
 function bpmToAngle(bpm) {
   return START_ANGLE + ((clampBpm(bpm) - BPM_MIN) / (BPM_MAX - BPM_MIN)) * TRAVEL;
 }
@@ -64,7 +75,7 @@ function playBeat(ctx) {
 
 // Classic metronome with a rotatable BPM knob, selectable time signature and drum sounds
 export default function Metronome() {
-  const [bpm, setBpm] = useState(120);
+  const [bpm, setBpm] = useState(loadBpm);
   const [sig, setSig] = useState(4);
   const [running, setRunning] = useState(false);
   const [beat, setBeat] = useState(0);
@@ -74,12 +85,16 @@ export default function Metronome() {
   const timerRef = useRef(null);
   const nextTRef = useRef(0);
   const beatRef = useRef(0);
-  const bpmRef = useRef(120);
+  const bpmRef = useRef(bpm);
   const sigRef = useRef(4);
   const runningRef = useRef(false);
   bpmRef.current = bpm;
   sigRef.current = sig;
   runningRef.current = running;
+
+  useEffect(() => {
+    try { localStorage.setItem(BPM_KEY, String(bpm)); } catch { /* storage unavailable */ }
+  }, [bpm]);
 
   // Map a pointer position over the knob to an angle, then to BPM
   const onPointer = (e) => {
