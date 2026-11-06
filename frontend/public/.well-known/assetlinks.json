@@ -1,0 +1,8 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "dev.workers.pauls_kaufmanis.files.twa",
+    "sha256_cert_fingerprints": ["F1:9F:2A:42:EF:36:77:E4:66:64:50:45:AD:46:51:DA:8C:25:34:24:54:4F:80:8A:D6:AC:49:70:EA:81:9B:59"]
+  }
+}]

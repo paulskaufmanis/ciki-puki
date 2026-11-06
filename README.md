@@ -8,6 +8,13 @@
 6. Add `public/icon-192.png` and `public/icon-512.png` (Chrome needs PNG icons to offer "Install")
 7. Dev: `npx wrangler dev` + `npm run dev` · Deploy: `npm run deploy` (HTTPS is required for the microphone and install)
 
+## Android .apk from PWABuilder without the address bar
+
+An .apk made by PWABuilder shows a Chrome bar (✕, share, ⋮) until Android can verify the site belongs to the app.
+Put PWABuilder's `assetlinks.json` (it is in the downloaded .zip) in `frontend/public/.well-known/assetlinks.json`, then `npm run deploy`.
+It must be served at `https://<your-domain>/.well-known/assetlinks.json` as JSON, and its `package_name` and `sha256_cert_fingerprints`
+must match the installed .apk (same signing key). Then reinstall the app, as the check happens on install.
+
 
 
 When you activate R2 later:
